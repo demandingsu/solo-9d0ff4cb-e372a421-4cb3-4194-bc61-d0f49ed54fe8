@@ -102,6 +102,7 @@ def upload_raw(conn: sqlite3.Connection, raw: bytes, filename: str) -> dict[str,
                 "SELECT id, status FROM raw_versions WHERE cast_id=? AND id != ?",
                 (batch.cast_id, version_id),
             ).fetchall()
+            had_prior = len(old) > 0
             for v in old:
                 if v["status"] != "superseded":
                     conn.execute(
@@ -112,6 +113,11 @@ def upload_raw(conn: sqlite3.Connection, raw: bytes, filename: str) -> dict[str,
                 "UPDATE casts SET current_version_id=NULL, updated_at=? WHERE cast_id=?",
                 (now, batch.cast_id),
             )
+            # 原始版重传：旧瓶样交接单留存但立即停止现行下载，新版发布后重新生成
+            if had_prior:
+                from .bottles import invalidate_current_sheets_on_raw_reupload
+
+                invalidate_current_sheets_on_raw_reupload(conn, batch.cast_id, now)
             conn.commit()
         except Exception:
             conn.rollback()

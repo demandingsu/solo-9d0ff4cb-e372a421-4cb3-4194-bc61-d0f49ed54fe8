@@ -36,7 +36,28 @@ def upload(client, rows, filename="cast.csv", header=HEADER):
     )
 
 
+BOTTLE_HEADER = "投放号,瓶号,采样序号,实验室盐度\n"
+
+
+def bottle_csv_text(rows, header=BOTTLE_HEADER):
+    return header + "".join(",".join(str(x) for x in r) + "\n" for r in rows)
+
+
+def upload_bottles(client, rows, tolerance=0.05, filename="bottles.csv", header=BOTTLE_HEADER):
+    return client.post(
+        "/api/bottle-batches",
+        files={"file": (filename, bottle_csv_text(rows, header).encode("utf-8"), "text/csv")},
+        data={"tolerance": str(tolerance)},
+    )
+
+
 @pytest.fixture()
 def helpers():
-    return type("H", (), {"csv_text": staticmethod(csv_text), "upload": staticmethod(upload),
-                          "HEADER": HEADER})()
+    return type("H", (), {
+        "csv_text": staticmethod(csv_text),
+        "upload": staticmethod(upload),
+        "bottle_csv_text": staticmethod(bottle_csv_text),
+        "upload_bottles": staticmethod(upload_bottles),
+        "HEADER": HEADER,
+        "BOTTLE_HEADER": BOTTLE_HEADER,
+    })()

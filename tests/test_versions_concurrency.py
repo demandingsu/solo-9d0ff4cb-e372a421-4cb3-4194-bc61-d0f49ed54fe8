@@ -176,8 +176,13 @@ def test_concurrent_publish_only_one_wins_and_no_half_state(client, helpers):
 
 def test_concurrent_correction_and_publish_never_publishes_stale_version(client, helpers):
     """交错：线程 A 准备确认 v1，同时线程 B 上传 v2 整版更正。
-    最终要么 v1 已发布后被 v2 取代（无现行版，等 v2 确认），
-    要么 v2 先到导致 v1 确认 409——绝不允许 v1 成为错误现行结果。"""
+
+    两个写事务经 BEGIN IMMEDIATE 串行化，只有两种合法的串行结果：
+    1) publish 先提交：v1 一度 published，随后被 v2 整版取代为 superseded
+       （publish 返回 200，最终状态仍可能是 superseded）；
+    2) upload 先提交：v1 已是 superseded，旧预览确认返回 409。
+    两种路径下都绝不允许 v1 成为错误的现行结果——最终现行指针必须为空。
+    """
     r1 = helpers.upload(client, [("C8", 1, 1.0, 20, 34)])
     v1 = r1.json()["version_id"]
     barrier = threading.Barrier(2)
@@ -199,18 +204,24 @@ def test_concurrent_correction_and_publish_never_publishes_stale_version(client,
     versions = client.get("/api/casts/C8/versions").json()
     assert len(versions) == 2
     v1_status = next(v for v in versions if v["id"] == v1)["status"]
+    v2_status = next(v for v in versions if v["version_no"] == 2)["status"]
     cast = next(c for c in client.get("/api/casts").json() if c["cast_id"] == "C8")
+    publish_code = next(code for name, code in outcomes if name == "publish")
 
-    if v1_status == "published":
-        # v1 先发布，随后被 v2 整版取代：现行指针必须为空，下载停止
-        assert cast["current_version_id"] is None
-        assert client.get("/api/casts/C8/profile.csv").status_code == 409
-        assert next(v for v in versions if v["version_no"] == 2)["status"] == "draft"
+    # v2 永远是草稿；upload 总会把旧版 superseded，故 v1 最终必为 superseded
+    assert v2_status == "draft"
+    assert v1_status == "superseded"
+
+    if publish_code == 409:
+        # upload 先提交：v1 已 superseded，旧预览确认被拒
+        pass
     else:
-        # v2 先到：v1 已 superseded，确认旧预览必须失败
-        assert v1_status == "superseded"
-        assert ("publish", 409) in outcomes
-        assert cast["current_version_id"] is None
+        # publish 先提交并返回 200；upload 随后把 v1 整版取代
+        assert publish_code == 200
+
+    # 两条路径的共同不变量：现行指针为空、现行下载停止、无错误现行结果
+    assert cast["current_version_id"] is None
+    assert client.get("/api/casts/C8/profile.csv").status_code == 409
 
     # 两种路径下，确认 v2 后都能恢复供数，且整条剖面来自 v2
     v2 = next(v for v in versions if v["version_no"] == 2)["id"]

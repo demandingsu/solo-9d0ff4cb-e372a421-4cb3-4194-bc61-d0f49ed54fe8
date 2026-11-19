@@ -85,9 +85,84 @@ CREATE TABLE IF NOT EXISTS missing_bins (
     FOREIGN KEY (version_id) REFERENCES raw_versions(id)
 );
 
+-- 瓶样批次（整批更正：同投放重传即新批次，旧批次立即 superseded）
+CREATE TABLE IF NOT EXISTS bottle_batches (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    cast_id       TEXT NOT NULL,
+    batch_no      INTEGER NOT NULL,            -- 瓶样批次号（投放内自增）
+    tolerance     REAL NOT NULL,               -- 本批平行瓶盐度容差
+    file_sha256   TEXT NOT NULL,
+    filename      TEXT,
+    row_count     INTEGER NOT NULL,
+    status        TEXT NOT NULL CHECK (status IN ('active','superseded')),
+    created_at    TEXT NOT NULL,
+    superseded_at TEXT,
+    UNIQUE (cast_id, batch_no),
+    FOREIGN KEY (cast_id) REFERENCES casts(cast_id)
+);
+
+CREATE TABLE IF NOT EXISTS bottle_rows (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id     INTEGER NOT NULL,
+    row_index    INTEGER NOT NULL,             -- 瓶样 CSV 数据行号（1 起）
+    bottle_no    TEXT NOT NULL,                -- 瓶号
+    sample_no    INTEGER NOT NULL,             -- 击发采样序号
+    lab_salinity REAL NOT NULL,                -- 实验室盐度（必填有限数）
+    UNIQUE (batch_id, row_index),
+    UNIQUE (batch_id, bottle_no),
+    FOREIGN KEY (batch_id) REFERENCES bottle_batches(id)
+);
+
+-- 交接单：一次生成对应“一个已提交瓶样版 + 一个已发布原始版”
+CREATE TABLE IF NOT EXISTS handover_sheets (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    cast_id          TEXT NOT NULL,
+    batch_id         INTEGER NOT NULL,
+    raw_version_id   INTEGER NOT NULL,
+    tolerance        REAL NOT NULL,
+    is_current       INTEGER NOT NULL DEFAULT 0,
+    delivered_count  INTEGER NOT NULL,
+    pending_count    INTEGER NOT NULL,         -- 平行组待核瓶数
+    unlinked_count   INTEGER NOT NULL,         -- 无法关联瓶数
+    created_at       TEXT NOT NULL,
+    superseded_at    TEXT,
+    invalidate_reason TEXT,                    -- raw_reupload / bottle_correction
+    UNIQUE (batch_id, raw_version_id),
+    FOREIGN KEY (batch_id) REFERENCES bottle_batches(id),
+    FOREIGN KEY (raw_version_id) REFERENCES raw_versions(id)
+);
+
+CREATE TABLE IF NOT EXISTS handover_rows (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    sheet_id        INTEGER NOT NULL,
+    row_index       INTEGER NOT NULL,
+    bottle_no       TEXT NOT NULL,
+    sample_no       INTEGER NOT NULL,
+    lab_salinity    REAL NOT NULL,
+    linked          INTEGER NOT NULL,          -- 1=已关联原始行 0=无法关联
+    raw_row_id      INTEGER,
+    raw_row_index   INTEGER,                   -- 原始 CSV 行号（依据）
+    depth           REAL,                      -- 原始行深度（回升行也取原始行）
+    ctd_temperature REAL,
+    ctd_salinity    REAL,
+    is_upcast       INTEGER NOT NULL DEFAULT 0,-- 对应原始行是否为回升/重复深度行
+    upcast_reason   TEXT,
+    parallel_size   INTEGER NOT NULL,          -- 同序号平行瓶数
+    salinity_spread REAL NOT NULL,             -- 同组实验室盐度极差
+    group_status    TEXT NOT NULL CHECK (group_status IN ('ok','pending')),
+    deliverable     INTEGER NOT NULL,
+    unlinked_reason TEXT,
+    FOREIGN KEY (sheet_id) REFERENCES handover_sheets(id),
+    FOREIGN KEY (raw_row_id) REFERENCES raw_rows(id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_raw_rows_version ON raw_rows(version_id);
 CREATE INDEX IF NOT EXISTS idx_versions_cast ON raw_versions(cast_id);
 CREATE INDEX IF NOT EXISTS idx_excluded_version ON excluded_rows(version_id);
+CREATE INDEX IF NOT EXISTS idx_bottle_batches_cast ON bottle_batches(cast_id);
+CREATE INDEX IF NOT EXISTS idx_bottle_rows_batch ON bottle_rows(batch_id);
+CREATE INDEX IF NOT EXISTS idx_handover_cast_current ON handover_sheets(cast_id, is_current);
+CREATE INDEX IF NOT EXISTS idx_handover_rows_sheet ON handover_rows(sheet_id);
 """
 
 # 进程内写锁：同一容器单进程下串行化写事务，数据库条件更新仍是最终防线。

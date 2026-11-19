@@ -26,3 +26,23 @@ HEADER_ALIASES = {
 
 REQUIRED_FIELDS = ("cast_id", "sample_no", "depth", "temperature", "salinity")
 OPTIONAL_MEASURED = ("temperature", "salinity")  # 允许空值，空即缺测
+
+# 瓶样 CSV 表头别名（列名 -> 规范字段）
+BOTTLE_HEADER_ALIASES = {
+    "投放号": "cast_id",
+    "cast_id": "cast_id",
+    "cast": "cast_id",
+    "瓶号": "bottle_no",
+    "bottle_no": "bottle_no",
+    "bottle": "bottle_no",
+    "采样序号": "sample_no",
+    "击发采样序号": "sample_no",
+    "sample_no": "sample_no",
+    "sequence": "sample_no",
+    "实验室盐度": "lab_salinity",
+    "盐度": "lab_salinity",
+    "lab_salinity": "lab_salinity",
+    "salinity": "lab_salinity",
+}
+
+BOTTLE_REQUIRED_FIELDS = ("cast_id", "bottle_no", "sample_no", "lab_salinity")

@@ -6,10 +6,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, Response
 
-from . import services
+from . import bottles, services
 from .config import MAX_UPLOAD_BYTES
 from .db import get_conn, init_db
 from .parsing import BatchRejected
@@ -94,6 +94,63 @@ def profile_csv(cast_id: str, conn: sqlite3.Connection = Depends(get_conn)) -> R
 @app.get("/api/versions/{version_id}/raw.csv")
 def raw_csv(version_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> Response:
     fname, text = services.export_raw_csv(conn, version_id)
+    return Response(
+        content=text,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+# ---------------------------------------------------------------- 瓶样交接单
+
+@app.post("/api/bottle-batches")
+async def upload_bottles(
+    file: UploadFile = File(...),
+    tolerance: float = Form(...),
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    raw = await file.read()
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail={"message": f"文件超过 {MAX_UPLOAD_BYTES} 字节上限"},
+        )
+    return bottles.upload_bottle_batch(conn, raw, file.filename or "bottles.csv", tolerance)
+
+
+@app.get("/api/casts/{cast_id}/bottle-batches")
+def bottle_batches(cast_id: str, conn: sqlite3.Connection = Depends(get_conn)) -> list[dict[str, Any]]:
+    return bottles.list_bottle_batches(conn, cast_id)
+
+
+@app.get("/api/casts/{cast_id}/handover-sheets")
+def handover_sheets(cast_id: str, conn: sqlite3.Connection = Depends(get_conn)) -> list[dict[str, Any]]:
+    return bottles.list_handover_sheets(conn, cast_id)
+
+
+@app.get("/api/handover-sheets/{sheet_id}")
+def handover_detail(sheet_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    return bottles.get_handover_detail(conn, sheet_id)
+
+
+@app.post("/api/casts/{cast_id}/handover-sheets/regenerate")
+def regenerate_handover(cast_id: str, conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    return bottles.regenerate_handover(conn, cast_id)
+
+
+@app.get("/api/casts/{cast_id}/handover.csv")
+def current_handover_csv(cast_id: str, conn: sqlite3.Connection = Depends(get_conn)) -> Response:
+    fname, text = bottles.export_current_handover_csv(conn, cast_id)
+    return Response(
+        content=text,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@app.get("/api/handover-sheets/{sheet_id}/handover.csv")
+def handover_csv(sheet_id: int, conn: sqlite3.Connection = Depends(get_conn)) -> Response:
+    fname, text = bottles.export_handover_csv(conn, sheet_id)
     return Response(
         content=text,
         media_type="text/csv; charset=utf-8",

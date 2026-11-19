@@ -26,6 +26,13 @@
   tr.excluded td { background:#ffebe9; color:var(--red); }
   tr.missing td { background:#fff8c5; color:var(--amber); }
   tr.retained td { background:#dafbe1; }
+  tr.pending td { background:#fff8c5; color:var(--amber); }
+  tr.unlinked td { background:#ffebe9; color:var(--red); }
+  tr.deliverable td { background:#dafbe1; }
+  .badge.pending { background:#fff8c5; color:var(--amber); }
+  .badge.deliver { background:#dafbe1; color:var(--green); }
+  .badge.archived { background:#f3f4f6; color:#6e7781; }
+  .badge.invalid { background:#ffebe9; color:var(--red); }
   .badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:600; }
   .badge.draft { background:#ddf4ff; color:#0969da; }
   .badge.published { background:#dafbe1; color:var(--green); }
@@ -85,6 +92,45 @@
     </div>
     <div id="preview" style="margin-top:18px"></div>
   </section>
+
+  <section class="card">
+    <h2>4. 瓶样交接单（列：投放号 / 瓶号 / 击发采样序号 / 实验室盐度）</h2>
+    <div class="row">
+      <input type="file" id="bottleFile" accept=".csv,text/csv">
+      <label>本批平行瓶盐度容差：<input type="number" id="tolerance" value="0.05" min="0" step="0.01" style="width:110px"></label>
+      <button class="primary" id="bottleBtn">上传瓶样并生成交接单</button>
+      <span class="muted">按采样序号关联现行已发布原始版的原始行；回升段采瓶也取原始行，不套用下行整米均值；同序号平行瓶盐度差超容差则整组待核</span>
+    </div>
+  </section>
+
+  <section class="card" id="handoverCard" hidden>
+    <h2>5. 交接单与瓶样批次 — <span id="handoverTitle"></span></h2>
+    <div class="row" style="margin-bottom:10px">
+      <button class="primary" id="regenBtn">重新生成交接单（原始新版发布后）</button>
+      <button id="currentDlBtn">下载现行交接单</button>
+      <span class="muted" id="handoverHint"></span>
+    </div>
+    <div class="tablewrap" style="max-height:200px">
+      <table id="sheetTable">
+        <thead><tr>
+          <th class="num">交接单id</th><th class="num">瓶样批次</th><th class="num">依据原始版</th>
+          <th class="num">容差</th><th>现行状态</th><th class="num">可交付</th><th class="num">待核</th>
+          <th class="num">无法关联</th><th>生成时间(UTC)</th><th>停用原因</th><th>操作</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="tablewrap" style="max-height:170px; margin-top:12px">
+      <table id="batchTable">
+        <thead><tr>
+          <th class="num">瓶样批次号</th><th>状态</th><th class="num">瓶数</th><th class="num">容差</th>
+          <th>文件名</th><th>sha256(前12位)</th><th>创建时间(UTC)</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div id="handoverPreview" style="margin-top:16px"></div>
+  </section>
 </main>
 <div id="alerts"></div>
 
@@ -142,8 +188,7 @@ async function openCast(castId) {
   currentCast = castId;
   $('#detailCard').hidden = false;
   $('#castTitle').textContent = castId;
-  const versions = await api('/api/casts/' + encodeURIComponent(castId) + '/versions');
-  const tb = $('#versionTable tbody');
+  const versions = await api('/api/casts/' + encodeURIComponent(castId) + '/versions');  const tb = $('#versionTable tbody');
   tb.innerHTML = '';
   for (const v of versions) {
     const tr = document.createElement('tr');
@@ -162,6 +207,7 @@ async function openCast(castId) {
   }
   const latest = versions[versions.length - 1];
   if (latest) preview(latest.id);
+  await loadHandover(castId);
 }
 
 async function preview(versionId) {
@@ -255,6 +301,180 @@ $('#uploadBtn').onclick = async () => {
     alert_('err', '整批拒收：' + e.message, e.errors);
     await loadCasts();
   }
+};
+
+// ---------------------------------------------------------------- 瓶样交接单
+
+const REASON_CN = {
+  bottle_correction: '瓶样整批更正',
+  raw_reupload: '原始版重传，待新版发布',
+  regenerate: '重新生成',
+};
+
+async function loadHandover(castId) {
+  $('#handoverCard').hidden = false;
+  $('#handoverTitle').textContent = castId;
+  const [sheets, batches] = await Promise.all([
+    api('/api/casts/' + encodeURIComponent(castId) + '/handover-sheets'),
+    api('/api/casts/' + encodeURIComponent(castId) + '/bottle-batches'),
+  ]);
+
+  const stb = $('#sheetTable tbody');
+  stb.innerHTML = '';
+  if (!sheets.length) {
+    stb.innerHTML = '<tr><td colspan="11" class="muted">暂无交接单：请先上传瓶样 CSV（需存在已发布原始版）</td></tr>';
+  }
+  for (const s of sheets) {
+    const status = s.is_current
+      ? '<span class="badge deliver">现行可下载</span>'
+      : '<span class="badge invalid">已停止现行下载</span>';
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td class="num">' + s.id + '</td>'
+      + '<td class="num">b' + s.batch_no + '</td>'
+      + '<td class="num">v' + s.raw_version_no + '</td>'
+      + '<td class="num">' + s.tolerance + '</td>'
+      + '<td>' + status + '</td>'
+      + '<td class="num">' + s.delivered_count + '</td>'
+      + '<td class="num">' + s.pending_count + '</td>'
+      + '<td class="num">' + s.unlinked_count + '</td>'
+      + '<td>' + esc(s.created_at) + '</td>'
+      + '<td>' + esc(REASON_CN[s.invalidate_reason] || s.invalidate_reason || '—') + '</td>'
+      + '<td><button onclick="previewSheet(' + s.id + ')">查看依据</button> '
+      + '<button onclick="downloadSheet(' + s.id + ')">下载此单</button></td>';
+    stb.appendChild(tr);
+  }
+
+  const btb = $('#batchTable tbody');
+  btb.innerHTML = '';
+  if (!batches.length) {
+    btb.innerHTML = '<tr><td colspan="7" class="muted">暂无瓶样批次</td></tr>';
+  }
+  for (const b of batches) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td class="num">b' + b.batch_no + '</td>'
+      + '<td>' + (b.status === 'active' ? '<span class="badge deliver">现行批次</span>'
+          : '<span class="badge archived">已被更正</span>') + '</td>'
+      + '<td class="num">' + b.row_count + '</td>'
+      + '<td class="num">' + b.tolerance + '</td>'
+      + '<td>' + esc(b.filename || '') + '</td>'
+      + '<td><code>' + esc(b.file_sha256.slice(0, 12)) + '</code></td>'
+      + '<td>' + esc(b.created_at) + '</td>';
+    btb.appendChild(tr);
+  }
+
+  const current = sheets.find(s => s.is_current);
+  $('#handoverHint').textContent = current
+    ? '现行交接单 #' + current.id + '（依据 b' + current.batch_no + ' × v' + current.raw_version_no
+        + '）：可交付 ' + current.delivered_count + ' 瓶，待核 ' + current.pending_count
+        + ' 瓶，无法关联 ' + current.unlinked_count + ' 瓶'
+    : '当前无现行交接单：原始新版发布后请点“重新生成交接单”，旧单仍可在下方查看与追溯下载';
+  if (current) previewSheet(current.id);
+  else $('#handoverPreview').innerHTML = '<p class="muted">无现行交接单明细</p>';
+}
+
+async function previewSheet(sheetId) {
+  const d = await api('/api/handover-sheets/' + sheetId);
+  const rows = d.rows.map(r => {
+    const cls = !r.linked ? 'unlinked' : (r.group_status === 'pending' ? 'pending' : 'deliverable');
+    const linkCell = r.linked
+      ? '<td class="num">' + r.raw_row_index + '</td><td class="num">' + fnum(r.depth, 3) + '</td>'
+        + '<td class="num">' + fnum(r.ctd_temperature, 3) + '</td><td class="num">' + fnum(r.ctd_salinity, 3) + '</td>'
+        + '<td>' + (r.is_upcast ? '<span class="badge pending">回升段采瓶（取原始行）</span><br><span class="muted">'
+            + esc(r.upcast_reason || '') + '</span>' : '否') + '</td>'
+      : '<td colspan="5" style="color:var(--red)">' + esc(r.unlinked_reason || '') + '</td>';
+    return '<tr class="' + cls + '"><td class="num">' + r.row_index + '</td>'
+      + '<td><code>' + esc(r.bottle_no) + '</code></td>'
+      + '<td class="num">' + r.sample_no + '</td>'
+      + '<td class="num">' + fnum(r.lab_salinity, 4) + '</td>'
+      + linkCell
+      + '<td class="num">' + r.parallel_size + '</td>'
+      + '<td class="num">' + fnum(r.salinity_spread, 4) + '</td>'
+      + '<td>' + (r.group_status === 'pending' ? '<span class="badge pending">整组待核</span>' : '<span class="badge deliver">合格</span>') + '</td>'
+      + '<td>' + (r.deliverable ? '<span class="badge deliver">可交付</span>' : '<span class="badge invalid">不交付</span>') + '</td></tr>';
+  }).join('');
+
+  $('#handoverPreview').innerHTML =
+    '<div class="row" style="justify-content:space-between">'
+    + '<div><strong>交接单 #' + d.id + '</strong> '
+    + (d.is_current ? '<span class="badge deliver">现行</span>' : '<span class="badge invalid">已停止现行下载（'
+        + esc(REASON_CN[d.invalidate_reason] || d.invalidate_reason || '') + '）</span>')
+    + ' <span class="muted">瓶样 b' + d.batch_no + '（' + esc(d.bottle_filename || '') + '，sha256 '
+        + esc(d.bottle_sha256.slice(0, 12)) + '）× 原始 v' + d.raw_version_no + '（'
+        + esc(d.raw_filename || '') + '，sha256 ' + esc(d.raw_sha256.slice(0, 12)) + '）· 容差 '
+        + d.tolerance + '</span></div>'
+    + '<div><button onclick="downloadSheet(' + d.id + ')">下载此单 CSV</button></div></div>'
+    + '<p class="legend" style="margin:10px 0 4px"><span><i style="background:#dafbe1"></i>可交付</span>'
+    + '<span><i style="background:#fff8c5"></i>平行组待核（盐度差超容差）</span>'
+    + '<span><i style="background:#ffebe9"></i>无法关联/不交付</span></p>'
+    + '<div class="tablewrap"><table>'
+    + '<thead><tr><th class="num">行</th><th>瓶号</th><th class="num">采样序号</th><th class="num">实验室盐度</th>'
+    + '<th class="num">原始行号</th><th class="num">原始深度</th><th class="num">原始水温</th><th class="num">原始盐度</th><th>回升段采瓶</th>'
+    + '<th class="num">平行瓶数</th><th class="num">盐度极差</th><th>组状态</th><th>交付资格</th></tr></thead><tbody>'
+    + rows + '</tbody></table></div>';
+}
+
+$('#bottleBtn').onclick = async () => {
+  const f = $('#bottleFile').files[0];
+  if (!f) { alert_('err', '请先选择瓶样 CSV 文件'); return; }
+  const tolerance = parseFloat($('#tolerance').value);
+  if (!Number.isFinite(tolerance) || tolerance < 0) {
+    alert_('err', '本批容差必须是非负数字'); return;
+  }
+  const fd = new FormData();
+  fd.append('file', f);
+  fd.append('tolerance', String(tolerance));
+  try {
+    const d = await api('/api/bottle-batches', {method: 'POST', body: fd});
+    if (d.sheet_created) {
+      alert_('ok', '瓶样批次 b' + d.batch_no + ' 已提交，交接单 #' + d.sheet_id
+        + ' 已生成：可交付 ' + d.delivered_count + ' 瓶，待核 ' + d.pending_count
+        + ' 瓶，无法关联 ' + d.unlinked_count + ' 瓶');
+    } else {
+      alert_('err', '瓶样批次 b' + d.batch_no + ' 已提交，但该投放暂无已发布原始版，未生成交接单；原始版发布后请点“重新生成交接单”');
+    }
+    currentCast = d.cast_id;
+    await loadCasts();
+    await openCast(d.cast_id);
+  } catch (e) {
+    alert_('err', '瓶样上传失败：' + e.message, e.errors);
+  }
+};
+
+$('#regenBtn').onclick = async () => {
+  if (!currentCast) return;
+  try {
+    const d = await api('/api/casts/' + encodeURIComponent(currentCast) + '/handover-sheets/regenerate',
+      {method: 'POST'});
+    alert_('ok', '已重新生成现行交接单 #' + d.id + '（依据 b' + d.batch_no + ' × v'
+      + d.raw_version_no + '）');
+    await loadHandover(currentCast);
+  } catch (e) {
+    alert_('err', '重新生成失败：' + e.message, e.errors);
+  }
+};
+
+async function downloadSheet(sheetId) {
+  const r = await fetch('/api/handover-sheets/' + sheetId + '/handover.csv');
+  if (!r.ok) { const d = await r.json(); alert_('err', d.detail?.message || d.message); return; }
+  const blob = await r.blob();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'handover_' + sheetId + '.csv';
+  a.click(); URL.revokeObjectURL(a.href);
+}
+
+$('#currentDlBtn').onclick = async () => {
+  if (!currentCast) return;
+  try {
+    const r = await fetch('/api/casts/' + encodeURIComponent(currentCast) + '/handover.csv');
+    if (!r.ok) { const d = await r.json(); throw new Error(d.detail?.message || d.message); }
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'handover_' + currentCast + '_current.csv';
+    a.click(); URL.revokeObjectURL(a.href);
+    alert_('ok', '现行交接单已下载（含瓶样批次与原始版双重依据）');
+  } catch (e) { alert_('err', '现行交接单下载失败：' + e.message); }
 };
 
 loadCasts();
