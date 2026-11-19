@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CTD 下行剖面管理</title>
+<style>
+  :root { --bd:#d0d7de; --bg:#f6f8fa; --blue:#0969da; --red:#cf222e; --green:#1a7f37; --amber:#9a6700; }
+  * { box-sizing: border-box; }
+  body { font-family: "Noto Sans CJK SC","Microsoft YaHei",system-ui,sans-serif; margin:0; color:#1f2328; }
+  header { background:#0d1117; color:#fff; padding:14px 24px; }
+  header h1 { margin:0; font-size:18px; }
+  header p { margin:4px 0 0; font-size:12px; color:#9da7b3; }
+  main { max-width:1180px; margin:0 auto; padding:20px 24px 60px; display:grid; gap:20px; }
+  section.card { border:1px solid var(--bd); border-radius:8px; background:#fff; padding:16px 18px; }
+  section.card h2 { margin:0 0 12px; font-size:15px; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+  button { border:1px solid var(--bd); background:var(--bg); border-radius:6px; padding:7px 14px; cursor:pointer; font-size:13px; }
+  button.primary { background:var(--blue); border-color:var(--blue); color:#fff; }
+  button.warn { background:#fff8c5; border-color:#d4a72c; color:var(--amber); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  table { border-collapse:collapse; width:100%; font-size:12.5px; }
+  th, td { border:1px solid var(--bd); padding:5px 8px; text-align:left; white-space:nowrap; }
+  th { background:var(--bg); position:sticky; top:0; }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  tr.excluded td { background:#ffebe9; color:var(--red); }
+  tr.missing td { background:#fff8c5; color:var(--amber); }
+  tr.retained td { background:#dafbe1; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:600; }
+  .badge.draft { background:#ddf4ff; color:#0969da; }
+  .badge.published { background:#dafbe1; color:var(--green); }
+  .badge.superseded { background:#f3f4f6; color:#6e7781; }
+  .badge.none { background:#fff8c5; color:var(--amber); }
+  #alerts { position:fixed; top:16px; right:16px; width:380px; z-index:99; display:grid; gap:8px; }
+  .alert { padding:10px 14px; border-radius:8px; font-size:13px; box-shadow:0 4px 14px rgba(0,0,0,.12); }
+  .alert.ok { background:#dafbe1; border:1px solid #4ac26b; }
+  .alert.err { background:#ffebe9; border:1px solid #ff8182; color:var(--red); }
+  .alert ul { margin:6px 0 0; padding-left:18px; max-height:220px; overflow:auto; }
+  .muted { color:#6e7781; font-size:12px; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+  @media (max-width:900px){ .grid2{grid-template-columns:1fr;} }
+  .tablewrap { max-height:340px; overflow:auto; border:1px solid var(--bd); border-radius:6px; }
+  code { background:var(--bg); padding:1px 5px; border-radius:4px; }
+  .legend span { margin-right:14px; font-size:12px; }
+  .legend i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>CTD 下行剖面管理系统</h1>
+  <p>上传原始采样 → 预览下行剖面与排除行 → 确认发布 → 下载带原始版依据的剖面；同投放重传即整版更正</p>
+</header>
+<main>
+  <section class="card">
+    <h2>1. 上传 CSV（列：投放号 / 采样序号 / 深度 / 水温 / 盐度）</h2>
+    <div class="row">
+      <input type="file" id="file" accept=".csv,text/csv">
+      <button class="primary" id="uploadBtn">上传并生成预览</button>
+      <span class="muted">坏行或同序号异值将拒收整批；同投放重传会替换为新版本，旧版立即停止现行下载</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>2. 投放列表</h2>
+    <div class="tablewrap">
+      <table id="castTable">
+        <thead><tr>
+          <th>投放号</th><th class="num">版本数</th><th>现行版本</th><th>现行状态</th><th>更新时间(UTC)</th><th>操作</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card" id="detailCard" hidden>
+    <h2>3. 版本历史与剖面预览 — <span id="castTitle"></span></h2>
+    <div class="tablewrap" style="max-height:220px">
+      <table id="versionTable">
+        <thead><tr>
+          <th class="num">版本号</th><th>状态</th><th>是否现行</th><th class="num">原始行数</th>
+          <th>文件名</th><th>sha256(前12位)</th><th>创建时间</th><th>发布时间</th><th>操作</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div id="preview" style="margin-top:18px"></div>
+  </section>
+</main>
+<div id="alerts"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+let currentCast = null;
+
+function alert_(kind, msg, errors) {
+  const el = document.createElement('div');
+  el.className = 'alert ' + (kind === 'ok' ? 'ok' : 'err');
+  el.innerHTML = '<div>' + msg + '</div>' + (errors ? '<ul>' + errors.map(e => '<li>' + e + '</li>').join('') + '</ul>' : '');
+  $('#alerts').appendChild(el);
+  setTimeout(() => el.remove(), kind === 'ok' ? 4000 : 9000);
+}
+
+async function api(url, opts) {
+  const r = await fetch(url, opts);
+  const data = r.status === 204 ? {} : await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const msg = data.detail?.message || data.message || ('HTTP ' + r.status);
+    const errs = data.detail?.errors || data.errors;
+    const e = new Error(msg); e.errors = errs; e.status = r.status; throw e;
+  }
+  return data;
+}
+
+function badge(status) {
+  const map = {draft:['草稿（待确认）','draft'], published:['已发布','published'], superseded:['已被更正','superseded']};
+  const [text, cls] = map[status] || [status, 'none'];
+  return '<span class="badge ' + cls + '">' + text + '</span>';
+}
+function esc(s){ return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function fnum(v, digits) { return v === null || v === undefined ? '<span class="muted">缺测</span>' : Number(v).toFixed(digits ?? 3); }
+
+async function loadCasts() {
+  const casts = await api('/api/casts');
+  const tb = $('#castTable tbody');
+  tb.innerHTML = '';
+  if (!casts.length) { tb.innerHTML = '<tr><td colspan="6" class="muted">暂无投放</td></tr>'; return; }
+  for (const c of casts) {
+    const tr = document.createElement('tr');
+    const status = c.current_version_id ? badge(c.current_status) : '<span class="badge none">无现行版（更正待确认，停止下载）</span>';
+    tr.innerHTML = '<td><code>' + esc(c.cast_id) + '</code></td>'
+      + '<td class="num">' + c.version_count + '</td>'
+      + '<td class="num">' + (c.current_version_no ? 'v' + c.current_version_no : '—') + '</td>'
+      + '<td>' + status + '</td>'
+      + '<td>' + esc(c.updated_at) + '</td>'
+      + '<td><button onclick="openCast(\'' + esc(c.cast_id) + '\')">查看版本/预览</button> '
+      + '<button onclick="downloadProfile(\'' + esc(c.cast_id) + '\')">下载现行剖面</button></td>';
+    tb.appendChild(tr);
+  }
+}
+
+async function openCast(castId) {
+  currentCast = castId;
+  $('#detailCard').hidden = false;
+  $('#castTitle').textContent = castId;
+  const versions = await api('/api/casts/' + encodeURIComponent(castId) + '/versions');
+  const tb = $('#versionTable tbody');
+  tb.innerHTML = '';
+  for (const v of versions) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td class="num">v' + v.version_no + '</td>'
+      + '<td>' + badge(v.status) + '</td>'
+      + '<td>' + (v.status === 'published' ? '是' : '否') + '</td>'
+      + '<td class="num">' + v.row_count + '</td>'
+      + '<td>' + esc(v.filename || '') + '</td>'
+      + '<td><code>' + esc(v.file_sha256.slice(0, 12)) + '</code></td>'
+      + '<td>' + esc(v.created_at) + '</td>'
+      + '<td>' + esc(v.published_at || '—') + '</td>'
+      + '<td><button onclick="preview(' + v.id + ')">预览</button> '
+      + (v.status === 'draft' ? '<button class="primary" onclick="publish(' + v.id + ')">确认发布</button> ' : '')
+      + '<button onclick="downloadRaw(' + v.id + ')">原始CSV</button></td>';
+    tb.appendChild(tr);
+  }
+  const latest = versions[versions.length - 1];
+  if (latest) preview(latest.id);
+}
+
+async function preview(versionId) {
+  const d = await api('/api/versions/' + versionId);
+  const missingSet = new Set(d.missing_bins);
+  const bins = d.bins.map(b => '<tr class="' + (missingSet.has(b.depth_bin) ? 'missing' : '') + '">'
+    + '<td class="num">' + b.depth_bin + '–' + (b.depth_bin + 1) + ' m</td>'
+    + '<td class="num">' + b.row_count + '</td>'
+    + '<td class="num">' + b.temp_count + '</td><td class="num">' + fnum(b.temp_mean, 4) + '</td>'
+    + '<td class="num">' + b.salinity_count + '</td><td class="num">' + fnum(b.salinity_mean, 4) + '</td></tr>').join('');
+
+  const ex = d.excluded_rows;
+  const exRows = ex.length ? ex.map(e => '<tr class="excluded"><td class="num">' + e.row_index + '</td><td class="num">' + e.sample_no
+    + '</td><td class="num">' + e.depth + '</td><td class="num">' + fnum(e.temperature, 3) + '</td><td class="num">' + fnum(e.salinity, 3)
+    + '</td><td>' + esc(e.reason_code) + '</td><td>' + esc(e.reason) + '<br><span class="muted">' + esc(e.detail) + '</span></td></tr>').join('')
+    : '<tr><td colspan="7" class="muted">无排除行，全部读数构成下行剖面</td></tr>';
+
+  const kept = d.raw_rows.filter(r => !ex.some(e => e.row_index === r.row_index));
+  const keptRows = kept.map(r => '<tr class="retained"><td class="num">' + r.row_index + '</td><td class="num">' + r.sample_no
+    + '</td><td class="num">' + r.depth + '</td><td class="num">' + fnum(r.temperature, 3) + '</td><td class="num">' + fnum(r.salinity, 3) + '</td></tr>').join('');
+
+  $('#preview').innerHTML =
+    '<div class="row" style="justify-content:space-between">'
+    + '<div><strong>版本 v' + d.version_no + '</strong> ' + badge(d.status)
+    + (d.is_current ? ' <span class="badge published">当前现行版</span>' : ' <span class="badge none">非现行</span>')
+    + ' <span class="muted">原始 ' + d.row_count + ' 行 · 保留 ' + kept.length + ' 行 · 排除 ' + ex.length + ' 行 · 缺测段 ' + d.missing_bins.length + ' 个</span></div>'
+    + '<div>' + (d.status === 'draft' ? '<button class="primary" onclick="publish(' + d.id + ')">确认发布此版本</button>' : '')
+    + ' <button onclick="downloadRaw(' + d.id + ')">下载原始CSV</button></div></div>'
+    + '<p class="legend" style="margin:10px 0 4px"><span><i style="background:#dafbe1"></i>保留的下行读数</span>'
+    + '<span><i style="background:#ffebe9"></i>排除的回升/重复深度行</span><span><i style="background:#fff8c5"></i>缺测深度段</span></p>'
+    + '<div class="grid2"><div><h3 style="font-size:13px">整米深度段温盐均值</h3><div class="tablewrap"><table>'
+    + '<thead><tr><th>深度段</th><th class="num">读数计数</th><th class="num">水温数</th><th class="num">水温均值</th><th class="num">盐度数</th><th class="num">盐度均值</th></tr></thead><tbody>'
+    + bins + '</tbody></table></div></div>'
+    + '<div><h3 style="font-size:13px">排除行及理由（回升读数不混入下行剖面）</h3><div class="tablewrap"><table>'
+    + '<thead><tr><th class="num">原始行</th><th class="num">采样序号</th><th class="num">深度</th><th class="num">水温</th><th class="num">盐度</th><th>原因码</th><th>说明</th></tr></thead><tbody>'
+    + exRows + '</tbody></table></div></div></div>'
+    + '<h3 style="font-size:13px;margin-top:14px">保留的下行读数（原始行号可回溯到原始版 sha256）</h3><div class="tablewrap"><table>'
+    + '<thead><tr><th class="num">原始行</th><th class="num">采样序号</th><th class="num">深度</th><th class="num">水温</th><th class="num">盐度</th></tr></thead><tbody>'
+    + keptRows + '</tbody></table></div>';
+}
+
+async function publish(versionId) {
+  if (!confirm('确认发布该版本？发布后才恢复现行剖面下载，同投放更早版本保持可追溯但不再现行。')) return;
+  try {
+    await api('/api/versions/' + versionId + '/publish', {method: 'POST'});
+    alert_('ok', '发布成功，现行剖面已更新');
+    await loadCasts();
+    if (currentCast) await openCast(currentCast);
+  } catch (e) {
+    if (e.status === 409) alert_('err', '确认失败：' + e.message, e.errors);
+    else alert_('err', e.message, e.errors);
+  }
+}
+
+async function downloadProfile(castId) {
+  try {
+    const r = await fetch('/api/casts/' + encodeURIComponent(castId) + '/profile.csv');
+    if (!r.ok) { const d = await r.json(); throw new Error(d.detail?.message || d.message); }
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'profile_' + castId + '.csv';
+    a.click(); URL.revokeObjectURL(a.href);
+    alert_('ok', '现行剖面已下载（含原始版依据与排除理由）');
+  } catch (e) { alert_('err', '下载失败：' + e.message); }
+}
+
+async function downloadRaw(versionId) {
+  const r = await fetch('/api/versions/' + versionId + '/raw.csv');
+  if (!r.ok) { const d = await r.json(); alert_('err', d.detail?.message || d.message); return; }
+  const blob = await r.blob();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'raw_v' + versionId + '.csv';
+  a.click(); URL.revokeObjectURL(a.href);
+}
+
+$('#uploadBtn').onclick = async () => {
+  const f = $('#file').files[0];
+  if (!f) { alert_('err', '请先选择 CSV 文件'); return; }
+  const fd = new FormData();
+  fd.append('file', f);
+  try {
+    const d = await api('/api/uploads', {method: 'POST', body: fd});
+    alert_('ok', '上传成功：投放 ' + d.cast_id + ' v' + d.version_no
+      + '（原始 ' + d.row_count + ' 行，保留 ' + d.retained_count + ' 行，排除 ' + d.excluded_count + ' 行）。请预览后确认发布。');
+    currentCast = d.cast_id;
+    await loadCasts();
+    await openCast(d.cast_id);
+  } catch (e) {
+    alert_('err', '整批拒收：' + e.message, e.errors);
+    await loadCasts();
+  }
+};
+
+loadCasts();
+setInterval(() => { if (!currentCast) loadCasts(); }, 15000);
+</script>
+</body>
+</html>

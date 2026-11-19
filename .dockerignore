@@ -1,0 +1,12 @@
+pylibs/
+.bootstrap/
+run-data/
+data/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+*.db
+*.db-wal
+*.db-shm
